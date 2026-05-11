@@ -1,0 +1,124 @@
+---
+# setup_awx_resources.yml
+# One-time setup: creates the AWX project, credentials, job template, and schedule
+# for the Akeyless-to-AWX credential sync.
+#
+# Run locally:
+#   CONTROLLER_HOST=https://awx-gce.wz.cs.akeyless.fans \
+#   CONTROLLER_USERNAME=waynezhu \
+#   CONTROLLER_PASSWORD='...' \
+#   ansible-playbook playbooks/setup_awx_resources.yml
+
+- name: Setup AWX resources for Akeyless credential sync
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    awx_host: "{{ lookup('env', 'CONTROLLER_HOST') }}"
+    awx_user: "{{ lookup('env', 'CONTROLLER_USERNAME') }}"
+    awx_pass: "{{ lookup('env', 'CONTROLLER_PASSWORD') }}"
+    awx_validate: false
+
+    project_name: "Akeyless AWS Credential Sync"
+    project_scm_url: "http://nas.mdwlab.org:3000/waynezhu/awx-akeyless-integration"
+    project_scm_branch: "main"
+
+    akeyless_credential_name: "akeyless_cert_auth_credential"
+    akeyless_ee_name: "akeyless-awx-ee"
+
+    aap_credential_name: "AWX Self-Referential"
+    job_template_name: "Sync AWS Credentials from Akeyless"
+    schedule_name: "Akeyless AWS Cred Sync - Every 15min"
+
+    # Configurable via extra_vars
+    akeyless_aws_secret_name: "{{ akeyless_secret_name | default('/devops/test-user-password-as-generic') }}"
+    akeyless_secret_type_val: "{{ akeyless_secret_type | default('static') }}"
+    aws_credential_name_val: "{{ aws_credential_name | default('aws-creds-from-akeyless') }}"
+
+  tasks:
+    - name: Validate AWX connection parameters
+      ansible.builtin.assert:
+        that:
+          - awx_host | length > 0
+          - awx_user | length > 0
+          - awx_pass | length > 0
+        fail_msg: "Set CONTROLLER_HOST, CONTROLLER_USERNAME, CONTROLLER_PASSWORD environment variables"
+
+    - name: Create project from gitea
+      awx.awx.project:
+        name: "{{ project_name }}"
+        scm_type: git
+        scm_url: "{{ project_scm_url }}"
+        scm_branch: "{{ project_scm_branch }}"
+        scm_update_on_launch: true
+        organization: Default
+        controller_host: "{{ awx_host }}"
+        controller_username: "{{ awx_user }}"
+        controller_password: "{{ awx_pass }}"
+        validate_certs: "{{ awx_validate }}"
+
+    - name: Create AAP credential for self-referential AWX API access
+      awx.awx.credential:
+        name: "{{ aap_credential_name }}"
+        credential_type: "Red Hat Ansible Automation Platform"
+        organization: Default
+        inputs:
+          host: "{{ awx_host }}"
+          username: "{{ awx_user }}"
+          password: "{{ awx_pass }}"
+          verify_ssl: false
+        state: present
+        controller_host: "{{ awx_host }}"
+        controller_username: "{{ awx_user }}"
+        controller_password: "{{ awx_pass }}"
+        validate_certs: "{{ awx_validate }}"
+
+    - name: Create sync job template
+      awx.awx.job_template:
+        name: "{{ job_template_name }}"
+        playbook: "playbooks/sync_aws_credential.yml"
+        project: "{{ project_name }}"
+        execution_environment: "{{ akeyless_ee_name }}"
+        credentials:
+          - "{{ akeyless_credential_name }}"
+          - "{{ aap_credential_name }}"
+        extra_vars:
+          AKEYLESS_AWS_SECRET_NAME: "{{ akeyless_aws_secret_name }}"
+          AKEYLESS_SECRET_TYPE: "{{ akeyless_secret_type_val }}"
+          AWS_CREDENTIAL_NAME: "{{ aws_credential_name_val }}"
+          AWS_CREDENTIAL_ORG: "Default"
+        job_type: run
+        state: present
+        controller_host: "{{ awx_host }}"
+        controller_username: "{{ awx_user }}"
+        controller_password: "{{ awx_pass }}"
+        validate_certs: "{{ awx_validate }}"
+
+    - name: Create sync schedule (every 15 minutes)
+      awx.awx.schedule:
+        name: "{{ schedule_name }}"
+        job_template: "{{ job_template_name }}"
+        rrule: "DTSTART;TZ=UTC:20260101T000000 RRULE:FREQ=MINUTELY;INTERVAL=15"
+        state: present
+        controller_host: "{{ awx_host }}"
+        controller_username: "{{ awx_user }}"
+        controller_password: "{{ awx_pass }}"
+        validate_certs: "{{ awx_validate }}"
+
+    - name: Report setup result
+      ansible.builtin.debug:
+        msg: |
+          AWX resources created successfully:
+            Project: {{ project_name }}
+            AAP Credential: {{ aap_credential_name }}
+            Job Template: {{ job_template_name }}
+            Schedule: {{ schedule_name }}
+
+          The sync job uses:
+            - Akeyless credential: {{ akeyless_credential_name }}
+            - Execution Environment: {{ akeyless_ee_name }}
+            - Secret path: {{ akeyless_aws_secret_name }}
+            - Target AWX credential: {{ aws_credential_name_val }}
+
+          Launch manually or wait for the schedule to trigger.

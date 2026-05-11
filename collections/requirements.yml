@@ -1,0 +1,4 @@
+---
+collections:
+  - name: akeyless.secrets_management
+  - name: awx.awx

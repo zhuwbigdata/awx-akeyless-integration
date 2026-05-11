@@ -1,0 +1,77 @@
+---
+# test_local.yml
+# Local test: authenticates to Akeyless using cert auth and fetches a known secret.
+# Requires the Akeyless cert and key to be available locally.
+#
+# Run:
+#   AKEYLESS_API_URL=https://api.akeyless.io \
+#   AKEYLESS_ACCESS_ID=p-f4wju0a1yiv1cm \
+#   AKEYLESS_CERT_FILE=/path/to/cert.pem \
+#   AKEYLESS_KEY_FILE=/path/to/key.pem \
+#   ansible-playbook playbooks/test_local.yml
+
+- name: Test Akeyless authentication and secret fetch
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    _ak_api_url: "{{ lookup('env', 'AKEYLESS_API_URL') | default('https://api.akeyless.io', true) }}"
+    _ak_access_type: "{{ lookup('env', 'AKEYLESS_ACCESS_TYPE') | default('cert', true) }}"
+    _ak_access_id: "{{ lookup('env', 'AKEYLESS_ACCESS_ID') | default('', true) }}"
+    _ak_cert_file: "{{ lookup('env', 'AKEYLESS_CERT_FILE') | default('', true) }}"
+    _ak_key_file: "{{ lookup('env', 'AKEYLESS_KEY_FILE') | default('', true) }}"
+    test_secret_name: "{{ lookup('env', 'TEST_SECRET_NAME') | default('/devops/test-user-password-as-generic', true) }}"
+
+  tasks:
+    - name: Validate required env vars
+      ansible.builtin.assert:
+        that:
+          - _ak_access_id | length > 0
+          - _ak_cert_file | length > 0
+          - _ak_key_file | length > 0
+        fail_msg: "Set AKEYLESS_ACCESS_ID, AKEYLESS_CERT_FILE, AKEYLESS_KEY_FILE environment variables"
+
+    - name: Read certificate file
+      ansible.builtin.slurp:
+        src: "{{ _ak_cert_file }}"
+      register: _cert_slurp
+
+    - name: Read private key file
+      ansible.builtin.slurp:
+        src: "{{ _ak_key_file }}"
+      register: _key_slurp
+
+    - name: Fetch secret from Akeyless
+      akeyless.secrets_management.get_static_secret_value:
+        akeyless_api_url: "{{ _ak_api_url }}"
+        access_type: "{{ _ak_access_type }}"
+        access_id: "{{ _ak_access_id }}"
+        cert_data: "{{ _cert_slurp.content }}"
+        key_data: "{{ _key_slurp.content }}"
+        names:
+          - "{{ test_secret_name }}"
+      register: _result
+
+    - name: Show fetch result (secret name only, not value)
+      ansible.builtin.debug:
+        msg: "Successfully fetched secret '{{ test_secret_name }}' ({{ _result.data[test_secret_name] | length }} chars)"
+
+    - name: Test AWX API connectivity
+      awx.awx.credential:
+        name: "test-connectivity"
+        organization: Default
+        credential_type: "Amazon Web Services"
+        state: exists
+        controller_host: "{{ lookup('env', 'CONTROLLER_HOST') | default(omit, true) }}"
+        controller_username: "{{ lookup('env', 'CONTROLLER_USERNAME') | default(omit, true) }}"
+        controller_password: "{{ lookup('env', 'CONTROLLER_PASSWORD') | default(omit, true) }}"
+        validate_certs: false
+      register: _awx_test
+      failed_when: false
+      when: lookup('env', 'CONTROLLER_HOST') | length > 0
+
+    - name: Report AWX connectivity
+      when: lookup('env', 'CONTROLLER_HOST') | length > 0
+      ansible.builtin.debug:
+        msg: "AWX API connectivity: {{ 'OK' if _awx_test is not failed else 'FAILED' }}"
